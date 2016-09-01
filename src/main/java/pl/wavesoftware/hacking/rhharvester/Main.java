@@ -1,59 +1,99 @@
 package pl.wavesoftware.hacking.rhharvester;
 
-import org.jsoup.Connection;
-import org.jsoup.Connection.Method;
-import org.jsoup.Connection.Response;
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
+import com.gargoylesoftware.htmlunit.BrowserVersion;
+import com.gargoylesoftware.htmlunit.UnexpectedPage;
+import com.gargoylesoftware.htmlunit.WebClient;
+import com.gargoylesoftware.htmlunit.WebResponse;
+import com.gargoylesoftware.htmlunit.html.DomElement;
+import com.gargoylesoftware.htmlunit.html.HtmlAnchor;
+import com.gargoylesoftware.htmlunit.html.HtmlButton;
+import com.gargoylesoftware.htmlunit.html.HtmlForm;
+import com.gargoylesoftware.htmlunit.html.HtmlPage;
+import com.gargoylesoftware.htmlunit.html.HtmlPasswordInput;
+import com.gargoylesoftware.htmlunit.html.HtmlTextInput;
+import pl.wavesoftware.eid.exceptions.Eid;
+import pl.wavesoftware.eid.exceptions.EidIllegalStateException;
 
 import java.io.IOException;
-import java.util.Map;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class Main {
     private static final String RH_DOMAIN = "https://access.redhat.com";
     private static final String SOFTWARE_DETAIL =
             RH_DOMAIN + "/jbossnetwork/restricted/softwareDetail.html";
-    private static final String CHROME_USER_AGENT =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36";
 
     public static void main(String[] args) throws IOException {
 
-        String fmt = "%s?softwareId=45681";
+        String fmt = "%s?softwareId=45371";
         String address = String.format(fmt, SOFTWARE_DETAIL);
-        Response response = Jsoup.connect(address)
-                .userAgent(CHROME_USER_AGENT)
-                .execute();
+        try (WebClient webClient = new WebClient(BrowserVersion.FIREFOX_45)) {
+            HtmlPage page1 = webClient.getPage(address);
+            Optional<HtmlForm> optionalForm = page1.getForms()
+                    .stream()
+                    .filter(htmlForm -> "kc-form-login".equals(htmlForm.getId()))
+                    .findFirst();
+            HtmlForm form = optionalForm.orElseThrow(() -> illegalState("20160901:112316"));
 
-        Document doc = response.parse();
-        Element samlForm = doc.select("form").iterator().next();
-        String samlUrl = samlForm.attr("action");
-        Elements inputs = samlForm.select("input");
-        Map<String, String> cookies = response.cookies();
+            final HtmlTextInput usernameField = form.getInputByName("username");
+            final HtmlPasswordInput passwordField = form.getInputByName("password");
+            final HtmlButton submit = form.getElementsByAttribute("button", "type", "submit")
+                    .stream()
+                    .map(HtmlButton.class::cast)
+                    .findAny()
+                    .orElseThrow(() -> illegalState("20160901:113016"));
 
-        Connection connection = Jsoup.connect(samlUrl)
-                .userAgent(CHROME_USER_AGENT)
-                .cookies(cookies)
-                .method(Method.POST);
-        inputs.forEach(element -> connection.data(element.attr("name"), element.val()));
+            usernameField.setValueAttribute("*****");
+            passwordField.setValueAttribute("*****");
 
-        response = connection.execute();
-        doc = response.parse();
-        Element form = doc.select("form").iterator().next();
+            HtmlPage page2 = submit.click();
+            HtmlAnchor downloadAnchor = page2.getElementsByTagName("a")
+                    .stream()
+                    .filter(Main::isDownloadAnchor)
+                    .map(HtmlAnchor.class::cast)
+                    .findFirst()
+                    .orElseThrow(() -> illegalState("20160901:114420"));
 
-        String ssoLoginUrl = form.attr("action");
-        cookies = response.cookies();
+            webClient.setConfirmHandler((page, message) -> true);
+            UnexpectedPage unexpectedPage = downloadAnchor.click();
+            Path saved = saveFile(unexpectedPage, Paths.get("target"));
+            System.out.println("File saved: " + saved);
+        }
+    }
 
-        response = Jsoup.connect(ssoLoginUrl)
-                .userAgent(CHROME_USER_AGENT)
-                .cookies(cookies)
-                .method(Method.POST)
-                .data("username", "****")
-                .data("password", "****")
-                .execute();
-        doc = response.parse();
-        System.out.print(doc);
+    private static Path saveFile(UnexpectedPage unexpectedPage, Path directory) {
+        try (InputStream stream = unexpectedPage.getInputStream()) {
+            WebResponse response = unexpectedPage.getWebResponse();
+            String filename = getFilename(response);
+            Path target = directory.resolve(filename);
+            Files.copy(stream, target);
+            return target;
+        } catch (IOException e) {
+            throw new EidIllegalStateException("20160901:115919", e);
+        }
+    }
+
+    private static String getFilename(WebResponse response) {
+        String value = Optional.ofNullable(
+                response.getResponseHeaderValue("Content-Disposition")
+        ).orElseThrow(() -> illegalState("20160901:120147"));
+        String regex = "attachment;\\s*filename=\"?(.+?)\"?";
+        Pattern pattern = Pattern.compile(regex);
+        Matcher matcher = pattern.matcher(value);
+        return matcher.group(1);
+    }
+
+    private static boolean isDownloadAnchor(DomElement domElement) {
+        return domElement.getTextContent().trim().equals("Download");
+    }
+
+    private static RuntimeException illegalState(String eid) {
+        return new EidIllegalStateException(new Eid(eid));
     }
 }
 
